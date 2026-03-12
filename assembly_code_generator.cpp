@@ -224,13 +224,14 @@ std::unordered_map<LLVMBasicBlockRef, char*> createBBLabels(LLVMValueRef func){
     return BBLabels;
 }
 
-// printDirectives
 void printDirectives(LLVMValueRef func, FILE* file_to_write){
     const char* func_label = LLVMGetValueName(func);
     fprintf(file_to_write, ".text\n.globl %s\n.type %s, @function\n%s:\n", func_label, func_label, func_label);
 }
 
-// printFunctionEnd
+void printFunctionEnd(FILE* file_to_write){
+    fprintf(file_to_write, "\tleave\n\tret\n");
+}
 
 // populates offset_map which associated a value(instruction) to the memory offset it has from %ebp and gets localMem
 std::pair<std::unordered_map<LLVMValueRef, int>, int> getOffsetMap(LLVMModuleRef module){
