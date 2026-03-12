@@ -5,6 +5,9 @@
 #include <utility>
 #include <algorithm>
 #include <vector>
+#include <string>
+#include <cstring>
+#include <cstudio>
 
 // returns instructions mapped to registers or -1 if to the point of the final result they 
 // spilled
@@ -205,8 +208,28 @@ LLVMValueRef find_spill(LLVMValueRef ins, std::unordered_map<LLVMValueRef, int>&
     return NULL;
 }
 
-// createBBLabels
+// creates char* labels for each basic block based block_counter
+std::unordered_map<LLVMBasicBlockRef, char*> createBBLabels(LLVMValueRef func){
+    std::unordered_map<LLVMBasicBlockRef, char*> BBLabels;
+    std::string curr_label = "";
+    char* curr_label_char_ptr = NULL;
+    int block_counter = 0; // the unique label for each is going to be generated based on the index they have
+    for (LLVMBasicBlockRef bb = LLVMGetFirstBasicBlock(func); bb != NULL; bb = LLVMGetNextBasicBlock(bb)){
+        curr_label = "BB" + std::to_string(block_counter);
+        // converting to char*
+        curr_label_char_ptr = strdup(curr_label.c_str());
+        BBLabels[bb] = curr_label_char_ptr;
+        block_counter++;
+    }
+    return BBLabels;
+}
+
 // printDirectives
+void printDirectives(LLVMValueRef func, FILE* file_to_write){
+    const char* func_label = LLVMGetValueName(func);
+    fprintf(file_to_write, ".text\n.globl %s\n.type %s, @function\n%s:\n", func_label, func_label, func_label);
+}
+
 // printFunctionEnd
 
 // populates offset_map which associated a value(instruction) to the memory offset it has from %ebp and gets localMem
