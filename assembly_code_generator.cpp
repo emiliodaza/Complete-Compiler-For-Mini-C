@@ -9,9 +9,18 @@
 #include <cstring>
 #include <cstudio>
 
+std::unordered_map <LLVMValueRef, int> register_allocation_algorithm(char* filename);
+std::unordered_map <LLVMValueRef, std::pair<int,int>> compute_liveness(LLVMBasicBlockRef bb, std::unordered_map<LLVMValueRef, int> inst_index);
+LLVMValueRef find_spill(LLVMValueRef ins, std::unordered_map<LLVMValueRef, int>& reg_map, std::unordered_map<LLVMValueRef, int>& inst_index, std::vector<LLVMValueRef>& sorted_list, std::unordered_map <LLVMValueRef, std::pair<int,int>>& live_range);
+std::unordered_map<LLVMBasicBlockRef, char*> createBBLabels(LLVMValueRef func);
+void printDirectives(LLVMValueRef func, FILE* file_to_write);
+void printFunctionEnd(FILE* file_to_write);
+std::pair<std::unordered_map<LLVMValueRef, int>, int> getOffsetMap(LLVMModuleRef module);
+
+
 // returns instructions mapped to registers or -1 if to the point of the final result they 
 // spilled
-std::unordered_map<LLVMValueRef, int> register_allocation_algorithm(char* filename) {
+std::unordered_map <LLVMValueRef, int> register_allocation_algorithm(char* filename) {
     std::unordered_map<LLVMValueRef, int> reg_map;
 
     LLVMContextRef context = LLVMContextCreate();
@@ -281,4 +290,53 @@ std::pair<std::unordered_map<LLVMValueRef, int>, int> getOffsetMap(LLVMModuleRef
         }
     }
     return {offset_map, localMem};
+}
+
+// code generation algorithm
+void assembly_code_generation(LLVMModuleRef module, std::unordered_map<LLVMValueRef, int>& reg_map, FILE* file_to_write){
+    for (LLVMValueRef func = LLVMGetFirstFunction(module); func != NULL; func = LLVMGetNextFunction(func)){
+        std::unordered_map<LLVMBasicBlockRef, char*> BBLabels = createBBLabels(func);
+        printDirectives(func, file_to_write);
+        std::pair<std::unordered_map<LLVMValueRef, int>, int> offset_map_local_mem_pair = getOffsetMap(module);
+        std::unordered_map<LLVMValueRef, int> offset_map = offset_map_local_mem_pair.first;
+        int localMem = offset_map_local_mem_pair.second;
+        fprintf(file_to_write, "\tpushl %%ebp\n");
+        fprintf(file_to_write, "\tmovl %%esp,%%ebp\n");
+        fprintf(file_to_write, "\tsubl $%d, %%esp\n", localMem);
+        fprintf(file_to_write, "\tpushl %%ebx\n");
+        for (LLVMBasicBlockRef bb = LLVMGetFirstBasicBlock(func); bb != NULL; bb = LLVMGetNextBasicBlock(bb)){
+            char* basic_block_label = BBLabels[bb];
+            fprintf(file_to_write, "%s:\n", basic_block_label);
+            for (LLVMValueRef ins = LLVMGetFirstInstruction(bb); ins != NULL; ins = LLVMGetNextInstruction(ins)){
+                if (LLVMGetInstructionOpcode(ins) == LLVMRet) {
+                    // since it is a return instruction we know it has one operand. Let's get that operand and name it A
+                    LLVMValueRef A = LLVMGetOperand(ins, 0);
+                    if (LLVMIsConstant(A)){
+                        fprintf(file_to_write, "\tmovl $%lld, %%eax\n", LLVMConstIntGetSExtValue(A));
+                    }
+                    // case: A is a temporary variable and is in memory
+                    else if (reg_map.find(A) != reg_map.end() && reg_map[A] == -1){
+                        int offset = offset_map[A];
+                        fprintf(file_to_write, "\tmovl %d(%%ebp),%%eax\n", offset);
+                    }
+                    // case: A is a temporary variable and has a physical register assigned to it
+                    else if(reg_map.find(A) != reg_map.end() && reg_map[A] != -1){
+                        // 0 refers to ebx, 1 refers to ecx, and 2 refers to edx
+                        if (reg_map[A] == 0){
+                            fprintf(file_to_write, "\tmovl %%ebx, %%eax\n");
+                        } else if (reg_map[A] == 1){
+                            fprintf(file_to_write, "\tmovl %%ecx, %%eax\n");
+                        } else {
+                            fprintf(file_to_write, "\tmovl %%edx, %%eax\n");
+                        }
+                    }
+                    fprintf(file_to_write, "\tpopl %%ebx\n");
+                    printFunctionEnd(file_to_write);
+                }
+                else if (LLVMGetInstructionOpcode(ins) == LLVMLoad){
+                    
+                }
+            }
+        }
+    }
 }
