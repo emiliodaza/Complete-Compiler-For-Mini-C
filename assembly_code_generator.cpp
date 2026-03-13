@@ -10,37 +10,19 @@
 #include <cstring>
 #include <cstdio>
 
-std::unordered_map <LLVMValueRef, int> register_allocation_algorithm(char* filename);
+std::unordered_map <LLVMValueRef, int> register_allocation_algorithm(LLVMModuleRef module);
 std::unordered_map <LLVMValueRef, std::pair<int,int>> compute_liveness(LLVMBasicBlockRef bb, std::unordered_map<LLVMValueRef, int>& inst_index);
 LLVMValueRef find_spill(LLVMValueRef ins, std::unordered_map<LLVMValueRef, int>& reg_map, std::unordered_map<LLVMValueRef, int>& inst_index, std::vector<LLVMValueRef>& sorted_list, std::unordered_map <LLVMValueRef, std::pair<int,int>>& live_range);
 std::unordered_map<LLVMBasicBlockRef, char*> createBBLabels(LLVMValueRef func);
 void printDirectives(LLVMValueRef func, FILE* file_to_write);
 void printFunctionEnd(FILE* file_to_write);
 std::pair<std::unordered_map<LLVMValueRef, int>, int> getOffsetMap(LLVMModuleRef module);
-
+void assembly_code_generation(LLVMModuleRef module, std::unordered_map<LLVMValueRef, int>& reg_map, FILE* file_to_write);
 
 // returns instructions mapped to registers or -1 if to the point of the final result they 
 // spilled
-std::unordered_map <LLVMValueRef, int> register_allocation_algorithm(char* filename) {
+std::unordered_map <LLVMValueRef, int> register_allocation_algorithm(LLVMModuleRef module) {
     std::unordered_map<LLVMValueRef, int> reg_map;
-
-    LLVMContextRef context = LLVMContextCreate();
-    LLVMMemoryBufferRef buffer = NULL;
-    LLVMModuleRef module = NULL;
-    char* err = NULL;
-
-    // reading the .ll file into the buffer
-    if (LLVMCreateMemoryBufferWithContentsOfFile(filename, &buffer, &err)) {
-        fprintf(stderr, "%s", err);
-        LLVMDisposeMessage(err);
-        exit(1);
-    }
-    // parse the IR text into the module
-    if (LLVMParseIRInContext(context, buffer, &module, &err)) {
-        fprintf(stderr, "%s", err);
-        LLVMDisposeMessage(err);
-        exit(2);
-    }
 
     for (LLVMValueRef func = LLVMGetFirstFunction(module); func != NULL; func = LLVMGetNextFunction(func)){
         if (LLVMIsDeclaration(func)){continue;} // if it is just a declaration it will not have basic blocks making the following iteration impossible
@@ -252,6 +234,7 @@ std::pair<std::unordered_map<LLVMValueRef, int>, int> getOffsetMap(LLVMModuleRef
     int localMem = 4;
     // since there is just one function the following loop will run once
     for (LLVMValueRef func = LLVMGetFirstFunction(module); func != NULL; func = LLVMGetNextFunction(func)){
+        if (LLVMIsDeclaration(func)){continue;}
         if (LLVMCountParams(func) > 0){
             // we only have one param by specifications of mini c so we use it
             LLVMValueRef parameter = LLVMGetParam(func, 0);
