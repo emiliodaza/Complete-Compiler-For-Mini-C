@@ -1,5 +1,6 @@
 #include <iostream>
 #include <llvm-c/Core.h>
+#include <llvm-c/IRReader.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -7,10 +8,10 @@
 #include <vector>
 #include <string>
 #include <cstring>
-#include <cstudio>
+#include <cstdio>
 
 std::unordered_map <LLVMValueRef, int> register_allocation_algorithm(char* filename);
-std::unordered_map <LLVMValueRef, std::pair<int,int>> compute_liveness(LLVMBasicBlockRef bb, std::unordered_map<LLVMValueRef, int> inst_index);
+std::unordered_map <LLVMValueRef, std::pair<int,int>> compute_liveness(LLVMBasicBlockRef bb, std::unordered_map<LLVMValueRef, int>& inst_index);
 LLVMValueRef find_spill(LLVMValueRef ins, std::unordered_map<LLVMValueRef, int>& reg_map, std::unordered_map<LLVMValueRef, int>& inst_index, std::vector<LLVMValueRef>& sorted_list, std::unordered_map <LLVMValueRef, std::pair<int,int>>& live_range);
 std::unordered_map<LLVMBasicBlockRef, char*> createBBLabels(LLVMValueRef func);
 void printDirectives(LLVMValueRef func, FILE* file_to_write);
@@ -42,6 +43,7 @@ std::unordered_map <LLVMValueRef, int> register_allocation_algorithm(char* filen
     }
 
     for (LLVMValueRef func = LLVMGetFirstFunction(module); func != NULL; func = LLVMGetNextFunction(func)){
+        if (LLVMIsDeclaration(func)){continue;} // if it is just a declaration it will not have basic blocks making the following iteration impossible
         for (LLVMBasicBlockRef bb = LLVMGetFirstBasicBlock(func); bb != NULL; bb = LLVMGetNextBasicBlock(bb)){
             std::unordered_set<int> available = {0,1,2}; // 0 refers to ebx, 1 refers to ecx, and 2 refers to edx
             std::unordered_map<LLVMValueRef, int> inst_index; // map of instructions to their respective index
@@ -138,7 +140,7 @@ std::unordered_map <LLVMValueRef, int> register_allocation_algorithm(char* filen
                         });
                         // using find_spill to find the LLVMValueRef V to spill based on heuristic
                         LLVMValueRef V = find_spill(ins, reg_map, inst_index, sorted_list, live_range);
-                        if (live_range.find(V) != live_range.end() && live_range.find(ins) != live_range.end()){
+                        if (V != NULL && live_range.find(V) != live_range.end() && live_range.find(ins) != live_range.end()){
                             int end_point_of_V = live_range[V].second;
                             int end_point_of_ins = live_range[ins].second;
                             // if liveness range of ins ends after liveness range of V
@@ -172,9 +174,10 @@ std::unordered_map <LLVMValueRef, int> register_allocation_algorithm(char* filen
             }
         }
     }
+    return reg_map;
 }
 
-std::unordered_map <LLVMValueRef, std::pair<int,int>> compute_liveness(LLVMBasicBlockRef bb, std::unordered_map<LLVMValueRef, int> inst_index){
+std::unordered_map <LLVMValueRef, std::pair<int,int>> compute_liveness(LLVMBasicBlockRef bb, std::unordered_map<LLVMValueRef, int>& inst_index){
     std::unordered_map <LLVMValueRef, std::pair<int,int>> live_range;
 
     // initialize the first and second element in the pair by the start index for now
@@ -295,6 +298,7 @@ std::pair<std::unordered_map<LLVMValueRef, int>, int> getOffsetMap(LLVMModuleRef
 // code generation algorithm
 void assembly_code_generation(LLVMModuleRef module, std::unordered_map<LLVMValueRef, int>& reg_map, FILE* file_to_write){
     for (LLVMValueRef func = LLVMGetFirstFunction(module); func != NULL; func = LLVMGetNextFunction(func)){
+        if (LLVMIsDeclaration(func)){continue;}
         std::unordered_map<LLVMBasicBlockRef, char*> BBLabels = createBBLabels(func);
         printDirectives(func, file_to_write);
         std::pair<std::unordered_map<LLVMValueRef, int>, int> offset_map_local_mem_pair = getOffsetMap(module);
@@ -444,14 +448,14 @@ void assembly_code_generation(LLVMModuleRef module, std::unordered_map<LLVMValue
                     // if the branch is unconditional (br label %b)
                     if (!LLVMIsConditional(ins)){
                         // getting label L of %b from bb_labels
-                        char* L = BBLabels[LLVMValueAsBasicBlock(LLVMGetOperand(ins, 0))];
+                        const char* L = BBLabels[LLVMValueAsBasicBlock(LLVMGetOperand(ins, 0))];
                         fprintf(file_to_write, "\tjmp %s\n", L);
                     } else {
                         // branch is conditional (br i1 %a, label %b, label %c)
                         // getting label L1 for %b
-                        char* L1 = BBLabels[LLVMValueAsBasicBlock(LLVMGetOperand(ins, 2))];
+                        const char* L1 = BBLabels[LLVMValueAsBasicBlock(LLVMGetOperand(ins, 2))];
                         // getting label L2 for %b
-                        char* L2 = BBLabels[LLVMValueAsBasicBlock(LLVMGetOperand(ins, 1))];
+                        const char* L2 = BBLabels[LLVMValueAsBasicBlock(LLVMGetOperand(ins, 1))];
                         LLVMValueRef condition = LLVMGetCondition(ins);
                         // getting the predicate T of comparison from instruction %a (<, >, <=, >=, ==)
                         LLVMIntPredicate predicate = LLVMGetICmpPredicate(condition);
@@ -475,9 +479,9 @@ void assembly_code_generation(LLVMModuleRef module, std::unordered_map<LLVMValue
                 }
 
                 // case instruction arithmetic (add/mul sub): %a = add nsw A,B
-                if (LLVMGetInstructionOpcode(ins) == LLVMAdd || LLVMGetInstructionOpcode(ins) == LLVMSub || LLVMGetInstructionOpcode(ins) == LLVMMul){
+                else if (LLVMGetInstructionOpcode(ins) == LLVMAdd || LLVMGetInstructionOpcode(ins) == LLVMSub || LLVMGetInstructionOpcode(ins) == LLVMMul){
                     if (reg_map.find(ins) != reg_map.end()){
-                        char* R = NULL
+                        const char* R = NULL;
                         // if %a has a physical register assigned to it then it gets assigned to R else R is %eax
                         if (reg_map[ins] != -1){
                             // 0 refers to ebx, 1 refers to ecx, and 2 refers to edx
@@ -496,13 +500,13 @@ void assembly_code_generation(LLVMModuleRef module, std::unordered_map<LLVMValue
                         LLVMValueRef A = LLVMGetOperand(ins, 0);
                         // checking if A is constant
                         if (LLVMIsConstant(A)){
-                            fprintf("\tmovl $%d, %s", LLVMConstIntGetSExtValue(A), R);
+                            fprintf(file_to_write, "\tmovl $%lld, %s\n", LLVMConstIntGetSExtValue(A), R);
                         }
                         // checking if A is a temporary variable
-                        if (reg_map.find(A) != reg_map.end()){
+                        else if (reg_map.find(A) != reg_map.end()){
                             // case for when A has a physical register assigned to it
                             if (reg_map[A] != -1){
-                                char* register_for_A = NULL;
+                                const char* register_for_A = NULL;
                             
                                 if (reg_map[A] == 0){
                                     register_for_A = "%ebx";
@@ -511,13 +515,15 @@ void assembly_code_generation(LLVMModuleRef module, std::unordered_map<LLVMValue
                                 } else {
                                     register_for_A = "%edx";
                                 }
-
-                                fprintf(file_to_write, "\tmovl %s, %s\n", register_for_A, R);
+                                // not emitting if both registers are the same
+                                if (strcmp(register_for_A, R)!= 0){
+                                    fprintf(file_to_write, "\tmovl %s, %s\n", register_for_A, R);
+                                }
                             } else {
                                 // case when A is in memory
                                 // getting offset n of A
                                 int n = offset_map[A];
-                                fprintf(file_to_write, "\tmovl %d(%%ebp), %s", n, R);
+                                fprintf(file_to_write, "\tmovl %d(%%ebp), %s\n", n, R);
                             }
                         }
                         // setting B
@@ -526,17 +532,17 @@ void assembly_code_generation(LLVMModuleRef module, std::unordered_map<LLVMValue
                         // case for when B is a constant
                         if (LLVMIsConstant(B)){
                             if (opcode_of_ins == LLVMAdd){
-                                fprintf(file_to_write, "\taddl $%d, %s\n", LLVMConstIntGetSExtValue(B), R);
+                                fprintf(file_to_write, "\taddl $%lld, %s\n", LLVMConstIntGetSExtValue(B), R);
                             } else if (opcode_of_ins == LLVMSub){
-                                fprintf(file_to_write, "\tsubl $%d, %s\n", LLVMConstIntGetSExtValue(B), R);
+                                fprintf(file_to_write, "\tsubl $%lld, %s\n", LLVMConstIntGetSExtValue(B), R);
                             } else {
-                                fprintf(file_to_write, "\timull $%d, %s\n", LLVMConstIntGetSExtValue(B), R);
+                                fprintf(file_to_write, "\timull $%lld, %s\n", LLVMConstIntGetSExtValue(B), R);
                             }
                         }
                         // checking if B is a temporary variable and has a physical register
-                        if (reg_map.find(B) != reg_map.end()){
+                        else if (reg_map.find(B) != reg_map.end()){
                             if (reg_map[B] != -1){
-                                char* register_for_B = NULL;
+                                const char* register_for_B = NULL;
                                 if (reg_map[B] == 0){
                                     register_for_B = "%ebx";
                                 } else if (reg_map[B] == 1){
@@ -568,12 +574,86 @@ void assembly_code_generation(LLVMModuleRef module, std::unordered_map<LLVMValue
                         if (reg_map[ins] == -1){
                             // getting offset k of %a
                             int k = offset_map[ins];
-                            fprintf(file_to_write, "\tmovl %%eax, %d(%%ebp)", k);
+                            fprintf(file_to_write, "\tmovl %%eax, %d(%%ebp)\n", k);
                         }
                     }
                 }
                 // case: ins is a compare instruction (%a = icmp slt A, B)
-                
+                else if ( LLVMGetInstructionOpcode(ins) == LLVMICmp){
+                    // if %a has a physical register assigned to it, then R becomes it, else it is %eax
+                    if (reg_map.find(ins) != reg_map.end()){
+                        const char* R = NULL;
+                        // if %a has a physical register assigned to it then it gets assigned to R else R is %eax
+                        if (reg_map[ins] != -1){
+                            // 0 refers to ebx, 1 refers to ecx, and 2 refers to edx
+                            if (reg_map[ins] == 0){
+                                R = "%ebx";
+                            } else if (reg_map[ins] == 1){
+                                R = "%ecx";
+                            } else {
+                                R = "%edx";
+                            }
+                        } else {
+                            R = "%eax";
+                        }
+                        // getting A
+                        LLVMValueRef A = LLVMGetOperand(ins, 0);
+                        if (LLVMIsConstant(A)){
+                            fprintf(file_to_write, "\tmovl $%lld, %s\n", LLVMConstIntGetSExtValue(A), R);
+                        }
+                        // checking case when A is a temporary variable
+                        else if (reg_map.find(A) != reg_map.end()){
+                        // case for when A has a physical register assigned to it
+                            if (reg_map[A] != -1){
+                                const char* register_for_A = NULL;
+                            
+                                if (reg_map[A] == 0){
+                                    register_for_A = "%ebx";
+                                } else if (reg_map[A] == 1){
+                                    register_for_A = "%ecx";
+                                } else {
+                                    register_for_A = "%edx";
+                                }
+                                // not emitting if both registers are the same
+                                if (strcmp(register_for_A, R)!= 0){
+                                    fprintf(file_to_write, "\tmovl %s, %s\n", register_for_A, R);
+                                }
+                            } else {
+                                // case when A is in memory
+                                // getting offset n of A
+                                int n = offset_map[A];
+                                fprintf(file_to_write, "\tmovl %d(%%ebp), %s\n", n, R);
+                            }
+                        }
+                        // getting B
+                        LLVMValueRef B = LLVMGetOperand(ins, 1);
+                        if (LLVMIsConstant(B)){
+                            fprintf(file_to_write, "\tcmpl $%lld, %s\n", LLVMConstIntGetSExtValue(B), R);
+                        }
+                        // checking if B is a temporary variable
+                        else if (reg_map.find(B) != reg_map.end()){
+                        // case for when B has a physical register assigned to it
+                            if (reg_map[B] != -1){
+                                const char* register_for_B = NULL;
+                            
+                                if (reg_map[B] == 0){
+                                    register_for_B = "%ebx";
+                                } else if (reg_map[B] == 1){
+                                    register_for_B = "%ecx";
+                                } else {
+                                    register_for_B = "%edx";
+                                }
+                                
+                                fprintf(file_to_write, "\tcmpl %s, %s\n", register_for_B, R);
+                            } else {
+                                // case when B is in memory
+                                // getting offset m of B
+                                int m = offset_map[B];
+                                fprintf(file_to_write, "\tcmpl %d(%%ebp), %s\n", m, R);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
