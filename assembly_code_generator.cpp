@@ -334,8 +334,246 @@ void assembly_code_generation(LLVMModuleRef module, std::unordered_map<LLVMValue
                     printFunctionEnd(file_to_write);
                 }
                 else if (LLVMGetInstructionOpcode(ins) == LLVMLoad){
-                    
+                    if (reg_map.find(ins) != reg_map.end() && reg_map[ins] != -1){
+                        // %b operand in template expression %a = load i32, i32* %b
+                        LLVMValueRef b = LLVMGetOperand(ins, 0);
+                        // offset c for %b
+                        int c = offset_map[b];
+                        // 0 refers to ebx, 1 refers to ecx, and 2 refers to edx
+                        if (reg_map[ins] == 0){
+                            fprintf(file_to_write, "\tmovl %d(%%ebp), %%ebx\n", c);
+                        } else if (reg_map[ins] == 1){
+                            fprintf(file_to_write, "\tmovl %d(%%ebp), %%ecx\n", c);
+                        } else {
+                            fprintf(file_to_write, "\tmovl %d(%%ebp), %%edx\n", c);
+                        }
+                    }
                 }
+                // case: if ins is a store: (store i32 A, i32* %b)
+                else if (LLVMGetInstructionOpcode(ins) == LLVMStore){
+                    LLVMValueRef A = LLVMGetOperand(ins, 0);
+                    // if A is a parameter
+                    if (LLVMCountParams(func) > 0 && A == LLVMGetParam(func, 0)){
+                        continue;
+                    // if A is a constant
+                    } else if (LLVMIsConstant(A)){
+                        // getting offset c of %b
+                        int c = offset_map[LLVMGetOperand(ins, 1)];
+                        fprintf(file_to_write, "\tmovl $%lld, %d(%%ebp)\n", LLVMConstIntGetSExtValue(A), c);
+                    } else if (reg_map.find(A) != reg_map.end()){
+                        if (reg_map[A] != -1){
+                            // getting offset c of %b
+                            int c = offset_map[LLVMGetOperand(ins, 1)];
+                            // 0 refers to ebx, 1 refers to ecx, and 2 refers to edx
+                            if (reg_map[A] == 0){
+                                fprintf(file_to_write, "\tmovl %%ebx, %d(%%ebp)\n", c);
+                            } else if (reg_map[A] == 1){
+                                fprintf(file_to_write, "\tmovl %%ecx, %d(%%ebp)\n", c);
+                            } else {
+                                fprintf(file_to_write, "\tmovl %%edx, %d(%%ebp)\n", c);
+                            }
+                        } else {
+                            // getting offset c1 of %a
+                            int c1 = offset_map[A];
+                            fprintf(file_to_write, "\tmovl %d(%%ebp), %%eax\n", c1);
+                            // getting offset c2 of %b
+                            int c2 = offset_map[LLVMGetOperand(ins, 1)];
+                            fprintf(file_to_write, "\tmovl %%eax, %d(%%ebp)\n", c2);
+                        }
+                    }
+                // case: (%a = call type @func()) or (call type @func(P))
+                } else if (LLVMGetInstructionOpcode(ins) == LLVMCall){
+                    fprintf(file_to_write, "\tpushl %%ecx\n");
+                    fprintf(file_to_write, "\tpushl %%edx\n");
+                    // if func takes a param P
+                    if (LLVMGetNumArgOperands(ins) > 0){
+                        LLVMValueRef P = LLVMGetOperand(ins, 0);
+                        if (LLVMIsConstant(P)){
+                            fprintf(file_to_write, "\tpushl $%lld\n", LLVMConstIntGetSExtValue(P));
+                        } else if (reg_map.find(P) != reg_map.end()){
+                            // if %p has a physical register assigned then we emit pushl to that register
+                            if (reg_map[P] != -1){
+                                // 0 refers to ebx, 1 refers to ecx, and 2 refers to edx
+                                if (reg_map[P] == 0){
+                                    fprintf(file_to_write, "\tpushl %%ebx\n");
+                                } else if (reg_map[P] == 1){
+                                    fprintf(file_to_write, "\tpushl %%ecx\n");
+                                } else {
+                                    fprintf(file_to_write, "\tpushl %%edx\n");
+                                }
+                            } else {
+                                // getting offset k of %p
+                                int k = offset_map[P];
+                                fprintf(file_to_write, "\tpushl %d(%%ebp)\n", k);
+                            }
+                        }
+                    }
+                    const char* function_name = LLVMGetValueName(LLVMGetCalledValue(ins));
+                    fprintf(file_to_write, "\tcall %s\n", function_name);
+                        // if func has a param P
+                    if (LLVMGetNumArgOperands(ins) > 0){
+                        fprintf(file_to_write, "\taddl $4, %%esp\n");
+                    }
+                    fprintf(file_to_write, "\tpopl %%edx\n");
+                    fprintf(file_to_write, "\tpopl %%ecx\n");
+                    
+                    // case: instruction is of the form (%a = call type @func())
+                    if (LLVMGetTypeKind(LLVMTypeOf(ins)) != LLVMVoidTypeKind){
+                        if (reg_map.find(ins) != reg_map.end()){
+                            // if %a has a physical register assigned to it
+                            if (reg_map[ins] != -1){
+                                // 0 refers to ebx, 1 refers to ecx, and 2 refers to edx
+                                if (reg_map[ins] == 0){
+                                    fprintf(file_to_write, "\tmovl %%eax, %%ebx\n");
+                                } else if (reg_map[ins] == 1){
+                                    fprintf(file_to_write, "\tmovl %%eax, %%ecx\n");
+                                } else {
+                                    fprintf(file_to_write, "\tmovl %%eax, %%edx\n");
+                                }
+                            } else { // if %a is in memory
+                                // getting offset k of %a
+                                int k = offset_map[ins];
+                                fprintf(file_to_write, "\tmovl %%eax, %d(%%ebp)\n", k);
+                            }
+                        }
+                    }
+                }
+                    
+                // case instruction is a branch: (br i1 %a, label %b, label %c) or (br label %b)
+                else if (LLVMGetInstructionOpcode(ins) == LLVMBr){
+                    // if the branch is unconditional (br label %b)
+                    if (!LLVMIsConditional(ins)){
+                        // getting label L of %b from bb_labels
+                        char* L = BBLabels[LLVMValueAsBasicBlock(LLVMGetOperand(ins, 0))];
+                        fprintf(file_to_write, "\tjmp %s\n", L);
+                    } else {
+                        // branch is conditional (br i1 %a, label %b, label %c)
+                        // getting label L1 for %b
+                        char* L1 = BBLabels[LLVMValueAsBasicBlock(LLVMGetOperand(ins, 2))];
+                        // getting label L2 for %b
+                        char* L2 = BBLabels[LLVMValueAsBasicBlock(LLVMGetOperand(ins, 1))];
+                        LLVMValueRef condition = LLVMGetCondition(ins);
+                        // getting the predicate T of comparison from instruction %a (<, >, <=, >=, ==)
+                        LLVMIntPredicate predicate = LLVMGetICmpPredicate(condition);
+                        // based on the value of T emits jxx L1
+                        if (predicate == LLVMIntEQ){
+                            fprintf(file_to_write, "\tje %s\n", L1);
+                        } else if (predicate == LLVMIntNE){
+                            fprintf(file_to_write, "\tjne %s\n", L1);
+                        } else if (predicate == LLVMIntSGT){
+                            fprintf(file_to_write, "\tjg %s\n", L1);
+                        } else if (predicate == LLVMIntSGE){
+                            fprintf(file_to_write, "\tjge %s\n", L1);
+                        } else if (predicate == LLVMIntSLT){
+                            fprintf(file_to_write, "\tjl %s\n", L1);
+                        } else if (predicate == LLVMIntSLE ){
+                            fprintf(file_to_write, "\tjle %s\n", L1);
+                        }
+                        // emits jmp L2
+                        fprintf(file_to_write, "\tjmp %s\n", L2);
+                    }
+                }
+
+                // case instruction arithmetic (add/mul sub): %a = add nsw A,B
+                if (LLVMGetInstructionOpcode(ins) == LLVMAdd || LLVMGetInstructionOpcode(ins) == LLVMSub || LLVMGetInstructionOpcode(ins) == LLVMMul){
+                    if (reg_map.find(ins) != reg_map.end()){
+                        char* R = NULL
+                        // if %a has a physical register assigned to it then it gets assigned to R else R is %eax
+                        if (reg_map[ins] != -1){
+                            // 0 refers to ebx, 1 refers to ecx, and 2 refers to edx
+                            if (reg_map[ins] == 0){
+                                R = "%ebx";
+                            } else if (reg_map[ins] == 1){
+                                R = "%ecx";
+                            } else {
+                                R = "%edx";
+                            }
+                        } else {
+                            R = "%eax";
+                        }
+
+                        // setting A
+                        LLVMValueRef A = LLVMGetOperand(ins, 0);
+                        // checking if A is constant
+                        if (LLVMIsConstant(A)){
+                            fprintf("\tmovl $%d, %s", LLVMConstIntGetSExtValue(A), R);
+                        }
+                        // checking if A is a temporary variable
+                        if (reg_map.find(A) != reg_map.end()){
+                            // case for when A has a physical register assigned to it
+                            if (reg_map[A] != -1){
+                                char* register_for_A = NULL;
+                            
+                                if (reg_map[A] == 0){
+                                    register_for_A = "%ebx";
+                                } else if (reg_map[A] == 1){
+                                    register_for_A = "%ecx";
+                                } else {
+                                    register_for_A = "%edx";
+                                }
+
+                                fprintf(file_to_write, "\tmovl %s, %s\n", register_for_A, R);
+                            } else {
+                                // case when A is in memory
+                                // getting offset n of A
+                                int n = offset_map[A];
+                                fprintf(file_to_write, "\tmovl %d(%%ebp), %s", n, R);
+                            }
+                        }
+                        // setting B
+                        LLVMValueRef B = LLVMGetOperand(ins, 1);
+                        LLVMOpcode opcode_of_ins = LLVMGetInstructionOpcode(ins);
+                        // case for when B is a constant
+                        if (LLVMIsConstant(B)){
+                            if (opcode_of_ins == LLVMAdd){
+                                fprintf(file_to_write, "\taddl $%d, %s\n", LLVMConstIntGetSExtValue(B), R);
+                            } else if (opcode_of_ins == LLVMSub){
+                                fprintf(file_to_write, "\tsubl $%d, %s\n", LLVMConstIntGetSExtValue(B), R);
+                            } else {
+                                fprintf(file_to_write, "\timull $%d, %s\n", LLVMConstIntGetSExtValue(B), R);
+                            }
+                        }
+                        // checking if B is a temporary variable and has a physical register
+                        if (reg_map.find(B) != reg_map.end()){
+                            if (reg_map[B] != -1){
+                                char* register_for_B = NULL;
+                                if (reg_map[B] == 0){
+                                    register_for_B = "%ebx";
+                                } else if (reg_map[B] == 1){
+                                    register_for_B = "%ecx";
+                                } else {
+                                    register_for_B = "%edx";
+                                }
+                                if (opcode_of_ins == LLVMAdd){
+                                    fprintf(file_to_write, "\taddl %s, %s\n", register_for_B, R);
+                                } else if (opcode_of_ins == LLVMSub){
+                                    fprintf(file_to_write, "\tsubl %s, %s\n", register_for_B, R);
+                                } else {
+                                    fprintf(file_to_write, "\timull %s, %s\n", register_for_B, R);
+                                }
+                            } else {
+                                // case when it is a temporary variable but it does not have a physical register
+                                // getting offset m of B
+                                int m = offset_map[B];
+                                if (opcode_of_ins == LLVMAdd){
+                                    fprintf(file_to_write, "\taddl %d(%%ebp), %s\n", m, R);
+                                } else if (opcode_of_ins == LLVMSub){
+                                    fprintf(file_to_write, "\tsubl %d(%%ebp), %s\n", m, R);
+                                } else {
+                                    fprintf(file_to_write, "\timull %d(%%ebp), %s\n", m, R);
+                                }
+                            }
+                        }
+                        // checking if %a is in memory
+                        if (reg_map[ins] == -1){
+                            // getting offset k of %a
+                            int k = offset_map[ins];
+                            fprintf(file_to_write, "\tmovl %%eax, %d(%%ebp)", k);
+                        }
+                    }
+                }
+                // case: ins is a compare instruction (%a = icmp slt A, B)
+                
             }
         }
     }
