@@ -1,6 +1,10 @@
 #include <llvm-c/Core.h>
 #include <llvm-c/TargetMachine.h>
-#include "ast/ast.h"
+#include "ast.h"
+#include <cstring>
+#include <cstdio>
+#include <cstdlib>
+#include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
 #include <string>
@@ -37,6 +41,8 @@ int counter_as_suffix = 0;
 std::vector<std::unordered_map<std::string, std::string>> maps_of_scopes;
 
 void var_names_unique(astNode* prog_node) {
+    maps_of_scopes.clear();
+    counter_as_suffix = 0;
     maps_of_scopes.push_back({});
     if (prog_node->type == ast_prog) {
         if ( prog_node->prog.func->func.param != NULL ) {
@@ -47,11 +53,13 @@ void var_names_unique(astNode* prog_node) {
             prog_node->prog.func->func.param->var.name = strdup(new_name_in_std_string.c_str());
             // we store the relation of old name and new name for the current scope (we convert to std::string to match map datatypes)
             maps_of_scopes.back()[std::string(old_name)] = new_name_in_std_string;
+            free(old_name);
         };
     }
 
     // we call the helper to rename variables inside the stmt_list
     helper_rename_stmt_list(prog_node -> prog.func -> func.body -> stmt.block.stmt_list);
+    maps_of_scopes.pop_back();
 }
 
 void helper_rename_stmt_list(vector<astNode*>* stmt_list) {
@@ -62,12 +70,17 @@ void helper_rename_stmt_list(vector<astNode*>* stmt_list) {
 }
 
 void helper_rename_stmt(astNode* stmt_astNode) {
+    if (stmt_astNode->type != ast_stmt) {
+        helper_rename_expr(stmt_astNode);
+        return;
+    }
     if (stmt_astNode->stmt.type == ast_decl) {
         char* old_name = stmt_astNode->stmt.decl.name;
         std::string new_name_in_std_string = std::string(old_name) + "_" + std::to_string(counter_as_suffix);
         counter_as_suffix++;
         stmt_astNode->stmt.decl.name = strdup(new_name_in_std_string.c_str());
         maps_of_scopes.back()[std::string(old_name)] = new_name_in_std_string;
+        free(old_name);
     } else if (stmt_astNode->stmt.type == ast_block) {
         // we introduce a new scope for analysis
         maps_of_scopes.push_back({});
@@ -109,6 +122,7 @@ void helper_rename_expr(astNode* expression) {
             }
         }
         expression->var.name = new_name;
+        if (new_name != old_name) free(old_name);
     } else if (expression->type == ast_rexpr) {
         helper_rename_expr(expression->rexpr.lhs);
         helper_rename_expr(expression->rexpr.rhs);
@@ -117,6 +131,8 @@ void helper_rename_expr(astNode* expression) {
         helper_rename_expr(expression->bexpr.rhs);
     } else if (expression->type == ast_uexpr) {
         helper_rename_expr(expression->uexpr.expr);
+    } else if (expression->type == ast_stmt && expression->stmt.type == ast_call) {
+        helper_rename_expr(expression->stmt.call.param);
     }
     // the other types are already handled before reaching this point like prog, func, or statement.
 }
@@ -125,19 +141,17 @@ void helper_rename_expr(astNode* expression) {
 LLVMModuleRef main_algorithm(astNode* prog_node) {
     // creating context to store all LLVM IR objects
     context = LLVMContextCreate();
-    printf("1. Context created...\n"); // debug print statements
 
     // getting the architecture from the machine
-    char* triple = LLVMGetDefaultTargetTriple();
+    // The handwritten assembly backend implements the Linux i386 ABI.
+    const char* triple = "i386-pc-linux-gnu";
     
     // generating module and setting target architecture
     LLVMModuleRef module = LLVMModuleCreateWithNameInContext("module",
                                                 context);
-    printf("2. Module created...\n");
 
     LLVMSetTarget(module, triple);
 
-    LLVMDisposeMessage(triple);
     
     // generating LLVMFunctions without bodies for print and read
     // creating data types definitions
@@ -155,7 +169,6 @@ LLVMModuleRef main_algorithm(astNode* prog_node) {
 
     // visiting the function node of the astProg node
     astNode* function_node = prog_node -> prog.func;
-    printf("Function node accessed...\n");
     
     // creating LLVM builder
     LLVMBuilderRef builder = LLVMCreateBuilderInContext(context);
@@ -186,7 +199,6 @@ LLVMModuleRef main_algorithm(astNode* prog_node) {
     LLVMBasicBlockRef entryBB = LLVMAppendBasicBlockInContext(context,
                                                 main_function,
                                                 "main_function_body");
-    printf("EntryBB created...\n");
     // creating set with names of all parameters and local variables
     std::unordered_set <std::string> names_of_params_and_local_vars;
     
@@ -194,7 +206,6 @@ LLVMModuleRef main_algorithm(astNode* prog_node) {
     if (param_count != 0) {
         char* name_of_param = pointer_to_param -> var.name;
         names_of_params_and_local_vars.insert(name_of_param);
-        printf("Param added...\n");
     }
     // adding local variables if applicable
     astNode* body = function_node -> func.body;
@@ -202,7 +213,6 @@ LLVMModuleRef main_algorithm(astNode* prog_node) {
         vector<astNode*> * stmt_list = body -> stmt.block.stmt_list;
         // call to helper method to continue filling the set
         set_insert_local_vars(&names_of_params_and_local_vars, stmt_list);
-        printf("Local vars added...\n");
     }
 
     // setting the position of the builder at the end of entryBB
@@ -214,9 +224,9 @@ LLVMModuleRef main_algorithm(astNode* prog_node) {
         LLVMValueRef alloca_object = LLVMBuildAlloca(builder, int_data_type, name_of_var.c_str());
         var_map[name_of_var] = alloca_object;
     }
-    printf("Allocas created...\n");
     // generating the alloc instruction for the return value
     ret_ref = LLVMBuildAlloca(builder, int_data_type, "ret_ref");
+    LLVMBuildStore(builder, LLVMConstInt(int_data_type, 0, 0), ret_ref);
     // generating the store instruction to store function parameter into respective alloca ptr
     if (param_count != 0) {
         // we get the param in LLVMValueRef type to feed as input to LLVMBuildStore
@@ -226,12 +236,11 @@ LLVMModuleRef main_algorithm(astNode* prog_node) {
         char* name_of_param_for_lookup = pointer_to_param -> var.name;
         LLVMValueRef relevant_alloca = var_map[name_of_param_for_lookup];
 
-        LLVMValueRef store_instruction_for_param = LLVMBuildStore(builder, main_function_llvm_param, relevant_alloca);
+        LLVMBuildStore(builder, main_function_llvm_param, relevant_alloca);
     }
     
     // generating retBB as the return basic block
     retBB = LLVMAppendBasicBlockInContext(context, main_function, "return");
-    printf("retBB created...\n");
 
     // setting the position of builder at the end of retBB
     LLVMPositionBuilderAtEnd(builder, retBB);
@@ -240,12 +249,10 @@ LLVMModuleRef main_algorithm(astNode* prog_node) {
     LLVMValueRef load_ins_to_retBB = LLVMBuildLoad2(builder, int_data_type, ret_ref,  "load");
 
     // adding return instruction for the load instruction
-    LLVMValueRef return_ins = LLVMBuildRet(builder, load_ins_to_retBB);
+    LLVMBuildRet(builder, load_ins_to_retBB);
 
-    printf("Starting genIRStmt...\n");
     // generating IR for the function body
     LLVMBasicBlockRef exitBB = genIRStmt(body, builder, entryBB);
-    printf("Completed genIRStmt...\n");
 
     // getting termiantor instruction of exitBB
     LLVMValueRef exitBB_terminator = LLVMGetBasicBlockTerminator(exitBB);
@@ -277,7 +284,6 @@ LLVMModuleRef main_algorithm(astNode* prog_node) {
             index_of_successor++;
         }
     }
-    printf("BFS completed...\n");
     LLVMBasicBlockRef bb = LLVMGetFirstBasicBlock(main_function);
     while (bb != NULL) {
         LLVMBasicBlockRef next_bb = LLVMGetNextBasicBlock(bb);
@@ -288,72 +294,34 @@ LLVMModuleRef main_algorithm(astNode* prog_node) {
         }
         bb = next_bb;
     }
-    printf("Deletion of disconnected basic blocks finished...\n");
     LLVMDisposeBuilder(builder);
     return module;
 }
 
-void set_insert_local_vars(std::unordered_set<std::string>* set_to_modify, vector<astNode*> * stmt_list) {
-
-    if (stmt_list == NULL) {
-        return;
-    }
-
-    for (astNode* stmt_node : *stmt_list) {
-        astStmt stmt = stmt_node -> stmt;
-        // base case: if the node is a declaration we just insert it
-        if (stmt.type == ast_decl) {
-            char* stmt_name = stmt.decl.name;
-            set_to_modify->insert(stmt_name);
-        }
-
-        // everytime we encounter a type of statement that can contain a stmt_list we recurse to process its potential declarations
-
-        if (stmt.type == ast_block) {
-            vector<astNode*> * stmt_list_inner_block = stmt.block.stmt_list;
-            set_insert_local_vars(set_to_modify, stmt_list_inner_block);
-        }
-
-        if (stmt.type == ast_while) {
-            astNode* while_body = stmt.whilen.body;
-            if (while_body != NULL) {
-                if (while_body->type == ast_stmt){
-                    if (while_body->stmt.type == ast_block) {
-                        vector<astNode*>* stmt_list_while_block = while_body -> stmt.block.stmt_list;
-                        set_insert_local_vars(set_to_modify, stmt_list_while_block);
-                    }
-                }
-            }
-        }
-
-        if (stmt.type == ast_if) {
-
-            // recurse the if body
-            astNode* if_body = stmt.ifn.if_body;
-            if (if_body != NULL) {
-                if (if_body->type == ast_stmt) {
-                    if (if_body->stmt.type == ast_block){
-                        vector<astNode*>* stmt_list_if_body = if_body -> stmt.block.stmt_list;
-                        set_insert_local_vars(set_to_modify, stmt_list_if_body);
-                    }
-                }
-            }
-
-            // recurse the else body if existent
-            astNode* else_body = stmt.ifn.else_body;
-            if (else_body != NULL) {
-                if (else_body->type == ast_stmt) {
-                    if (else_body->stmt.type == ast_block){
-                        vector<astNode*>* stmt_list_else_body = else_body -> stmt.block.stmt_list;
-                        set_insert_local_vars(set_to_modify, stmt_list_else_body);
-                    }
-                }
-            }
-        }
+static void collect_local_vars(std::unordered_set<std::string>* names, astNode* node) {
+    if (!node || node->type != ast_stmt) return;
+    switch (node->stmt.type) {
+        case ast_decl: names->insert(node->stmt.decl.name); break;
+        case ast_block: set_insert_local_vars(names, node->stmt.block.stmt_list); break;
+        case ast_while: collect_local_vars(names, node->stmt.whilen.body); break;
+        case ast_if:
+            collect_local_vars(names, node->stmt.ifn.if_body);
+            collect_local_vars(names, node->stmt.ifn.else_body);
+            break;
+        default: break;
     }
 }
 
+void set_insert_local_vars(std::unordered_set<std::string>* names, vector<astNode*>* statements) {
+    if (statements) for (astNode* node : *statements) collect_local_vars(names, node);
+}
+
 LLVMBasicBlockRef genIRStmt(astNode* statement_node, LLVMBuilderRef builder, LLVMBasicBlockRef startBB) {
+    if (statement_node->type != ast_stmt) {
+        LLVMPositionBuilderAtEnd(builder, startBB);
+        genIRExpr(statement_node, builder);
+        return startBB;
+    }
     // astStmt object
     astStmt stmt_object = statement_node -> stmt;
     if (stmt_object.type == ast_asgn) {
@@ -367,9 +335,7 @@ LLVMBasicBlockRef genIRStmt(astNode* statement_node, LLVMBuilderRef builder, LLV
         return startBB;
     } else if (stmt_object.type == ast_call) {
         LLVMPositionBuilderAtEnd(builder, startBB);
-        // the value being printed is the parameter of associated call so we pass that as expression input to get its LLVMValueRef
-        LLVMValueRef value_to_print = genIRExpr(stmt_object.call.param, builder);
-        LLVMBuildCall2(builder, print_type, print_func, &value_to_print, 1, "call_to_print");
+        genIRExpr(statement_node, builder);
         return startBB;
     } else if (stmt_object.type == ast_while) {
         LLVMPositionBuilderAtEnd(builder, startBB);
@@ -380,6 +346,7 @@ LLVMBasicBlockRef genIRStmt(astNode* statement_node, LLVMBuilderRef builder, LLV
         LLVMPositionBuilderAtEnd(builder, condBB);
         // generating LLVMValueRef of the relational expression in the condition of the while loop
         LLVMValueRef rexpr_while = genIRExpr(stmt_object.whilen.cond, builder);
+        rexpr_while = LLVMBuildICmp(builder, LLVMIntNE, rexpr_while, LLVMConstInt(int_data_type, 0, 0), "while_cond");
         // generating two basic blocks that will be the successors when condition is true or false respectively
         LLVMBasicBlockRef trueBB = LLVMAppendBasicBlockInContext(context, main_function, "trueBB");
         LLVMBasicBlockRef falseBB = LLVMAppendBasicBlockInContext(context, main_function, "falseBB");
@@ -396,6 +363,7 @@ LLVMBasicBlockRef genIRStmt(astNode* statement_node, LLVMBuilderRef builder, LLV
         LLVMPositionBuilderAtEnd(builder, startBB);
         // generating LLVMValueRef of if condition
         LLVMValueRef rexpr_if = genIRExpr(stmt_object.ifn.cond, builder);
+        rexpr_if = LLVMBuildICmp(builder, LLVMIntNE, rexpr_if, LLVMConstInt(int_data_type, 0, 0), "if_cond");
         // generating two basic blocks that will be successors depending on the condition truth value
         LLVMBasicBlockRef trueBB = LLVMAppendBasicBlockInContext(context, main_function, "trueBB");
         LLVMBasicBlockRef falseBB = LLVMAppendBasicBlockInContext(context, main_function, "falseBB");
@@ -479,6 +447,20 @@ LLVMValueRef genIRExpr(astNode* expression, LLVMBuilderRef builder) {
             return bexpr_sub;
 
         } else if (expression -> bexpr.op == divide) {
+            // LLVM folds invalid constant division to poison. Diagnose it
+            // before the integer-only assembly backend tries to emit it.
+            if (LLVMIsAConstantInt(processed_rhs)) {
+                long long divisor = LLVMConstIntGetSExtValue(processed_rhs);
+                if (divisor == 0) {
+                    fprintf(stderr, "Semantic error: division by zero in a constant expression\n");
+                    exit(5);
+                }
+                if (divisor == -1 && LLVMIsAConstantInt(processed_lhs) &&
+                    LLVMConstIntGetSExtValue(processed_lhs) == INT32_MIN) {
+                    fprintf(stderr, "Semantic error: signed division overflow in a constant expression\n");
+                    exit(5);
+                }
+            }
             LLVMValueRef bexpr_div = LLVMBuildSDiv(builder, processed_lhs, processed_rhs, "bexpr_div");
 
             return bexpr_div;
@@ -498,35 +480,39 @@ LLVMValueRef genIRExpr(astNode* expression, LLVMBuilderRef builder) {
         if (expression->rexpr.op == lt) {
             LLVMValueRef lt_cmp = LLVMBuildICmp(builder, LLVMIntSLT, lhs_processed, rhs_processed, "lt_cmp");
 
-            return lt_cmp;
+            return LLVMBuildZExt(builder, lt_cmp, int_data_type, "bool_int");
 
         } else if (expression -> rexpr.op == gt) {
             LLVMValueRef gt_cmp = LLVMBuildICmp(builder, LLVMIntSGT, lhs_processed, rhs_processed, "gt_cmp");
 
-            return gt_cmp;
+            return LLVMBuildZExt(builder, gt_cmp, int_data_type, "bool_int");
 
         } else if (expression -> rexpr.op == le) {
             LLVMValueRef le_cmp = LLVMBuildICmp(builder, LLVMIntSLE, lhs_processed, rhs_processed, "le_cmp");
 
-            return le_cmp;
+            return LLVMBuildZExt(builder, le_cmp, int_data_type, "bool_int");
 
         } else if (expression -> rexpr.op == ge) {
             LLVMValueRef ge_cmp = LLVMBuildICmp(builder, LLVMIntSGE, lhs_processed, rhs_processed, "ge_cmp");
 
-            return ge_cmp;
+            return LLVMBuildZExt(builder, ge_cmp, int_data_type, "bool_int");
 
         } else if (expression -> rexpr.op == eq) {
             LLVMValueRef eq_cmp = LLVMBuildICmp(builder, LLVMIntEQ, lhs_processed, rhs_processed, "eq_cmp");
 
-            return eq_cmp;
+            return LLVMBuildZExt(builder, eq_cmp, int_data_type, "bool_int");
             
         } else if (expression -> rexpr.op == neq) {
             LLVMValueRef neq_cmp = LLVMBuildICmp(builder, LLVMIntNE, lhs_processed, rhs_processed, "neq_cmp");
 
-            return neq_cmp;
+            return LLVMBuildZExt(builder, neq_cmp, int_data_type, "bool_int");
 
         }
     } else if (expression -> type == ast_stmt && expression -> stmt.type == ast_call) {
+        if (strcmp(expression->stmt.call.name, "print") == 0) {
+            LLVMValueRef value = genIRExpr(expression->stmt.call.param, builder);
+            return LLVMBuildCall2(builder, print_type, print_func, &value, 1, "");
+        }
         // for the read function the param field will be NULL so the count of params is 0
         LLVMValueRef call_llvm = LLVMBuildCall2(builder, read_type, readFunc, NULL, 0, "call_llvm");
 

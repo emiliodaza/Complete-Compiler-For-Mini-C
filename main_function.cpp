@@ -28,7 +28,7 @@ extern bool run_dead_code_elimination(LLVMValueRef func);
 extern void constant_propagation_and_constant_folding(LLVMValueRef func);
 extern std::unordered_map <LLVMValueRef, int> register_allocation_algorithm(LLVMModuleRef module);
 extern void assembly_code_generation(LLVMModuleRef module, std::unordered_map<LLVMValueRef, int>& reg_map, FILE* file_to_write);
-extern void yylex_destroy();
+extern int yylex_destroy();
 extern void freeNode(astNode* node);
 
 
@@ -90,11 +90,17 @@ int main(int argc, char* argv[]){
         // global optimization until fixed point
         constant_propagation_and_constant_folding(func);
     }
+    if (LLVMVerifyModule(module, LLVMReturnStatusAction, &err)) {
+        fprintf(stderr, "The optimized module is not valid: %s\n", err);
+        LLVMDisposeMessage(err);
+        exit(6);
+    }
+    LLVMDisposeMessage(err);
     // register allocation & assembly
     std::unordered_map <LLVMValueRef, int> reg_map = register_allocation_algorithm(module);
     // creating output_filename .s
     std::string output_filename = std::string(filename, ptr_to_last_dot) + ".s";
-    FILE* file_to_write = fopen(strdup(output_filename.c_str()), "w");
+    FILE* file_to_write = fopen(output_filename.c_str(), "w");
     if (file_to_write == NULL){
         fprintf(stderr, "Could not open output file\n");
         exit(7);
@@ -104,7 +110,9 @@ int main(int argc, char* argv[]){
     fclose(file_to_write);
     yylex_destroy();
     freeNode(root);
+    LLVMContextRef context = LLVMGetModuleContext(module);
     LLVMDisposeModule(module);
+    LLVMContextDispose(context);
     LLVMShutdown();
     return 0;
 }

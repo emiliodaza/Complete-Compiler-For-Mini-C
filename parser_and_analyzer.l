@@ -3,9 +3,19 @@
     #include <stdio.h>
     #include <stdlib.h>
     #include <string.h>
+    #include <errno.h>
+    #include <limits.h>
 %}
+%option yylineno noinput nounput
+%x COMMENT
 %%
-[0-9]+                      {yylval.ival = atoi(yytext); return NUM;}
+"//"[^\n]*                  ;
+"/*"                        {BEGIN(COMMENT);}
+<COMMENT>"*/"               {BEGIN(INITIAL);}
+<COMMENT>\n                 ;
+<COMMENT>.                  ;
+<COMMENT><<EOF>>            {fprintf(stderr, "Unterminated comment at line %d\n", yylineno); return YYUNDEF;}
+[0-9]+                      {errno = 0; long value = strtol(yytext, NULL, 10); if (errno || value > INT_MAX) {fprintf(stderr, "Integer literal out of range at line %d\n", yylineno); return YYUNDEF;} yylval.ival = (int)value; return NUM;}
 "+"                         {return ADD;}
 "-"                         {return MINUS;}
 "/"                         {return DIVIDE;}
@@ -41,7 +51,7 @@
 
 [a-zA-Z_][a-zA-Z0-9_]*      {yylval.sval = strdup(yytext); return IDENTIFIER;}
 
-[ \t\n]+                    ;
+[ \t\r\n]+                  ;
 
 .                           {fprintf(stderr, "Invalid syntax error '%s'\n", yytext); exit(1);}
 %%

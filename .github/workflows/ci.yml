@@ -1,0 +1,42 @@
+name: Build and test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux build, emulation, and native i386 execution
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential clang llvm-dev bison flex gcc-multilib python3-venv
+          python3 -m venv .venv
+          .venv/bin/python -m pip install -r tests/requirements.txt
+      - name: Build from source
+        run: make -j2
+      - name: Check emulated and native machine code against Clang
+        run: make test-native
+      - name: Run documented examples
+        run: |
+          make demo
+          ./minic examples/read_and_compute.c
+          cc -m32 -no-pie examples/read_and_compute.s runtime.c -o build/read_and_compute
+          printf '20\n3\n' | ./build/read_and_compute > build/example.stdout 2> build/example.stderr
+          printf '23\n17\n60\n6\n' > build/expected.stdout
+          printf 'return=23\n' > build/expected.stderr
+          diff -u build/expected.stdout build/example.stdout
+          diff -u build/expected.stderr build/example.stderr

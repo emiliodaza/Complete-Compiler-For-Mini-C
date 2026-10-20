@@ -85,7 +85,8 @@ std::unordered_map <LLVMValueRef, int> register_allocation_algorithm(LLVMModuleR
                             // if live range of the second operand ends and it has a physical register then we add it to available
                             if (live_range.find(second_operand) != live_range.end() && live_range[second_operand].second == inst_index[ins]){
                                 if (reg_map.find(second_operand) != reg_map.end() && reg_map[second_operand] != -1){
-                                    available.insert(reg_map[second_operand]);
+                                    if (reg_map[second_operand] != reg_map[ins])
+                                        available.insert(reg_map[second_operand]);
                                 }
                             } 
                         }
@@ -122,6 +123,7 @@ std::unordered_map <LLVMValueRef, int> register_allocation_algorithm(LLVMModuleR
                         });
                         // using find_spill to find the LLVMValueRef V to spill based on heuristic
                         LLVMValueRef V = find_spill(ins, reg_map, inst_index, sorted_list, live_range);
+                        reg_map[ins] = -1;
                         if (V != NULL && live_range.find(V) != live_range.end() && live_range.find(ins) != live_range.end()){
                             int end_point_of_V = live_range[V].second;
                             int end_point_of_ins = live_range[ins].second;
@@ -186,6 +188,7 @@ std::unordered_map <LLVMValueRef, std::pair<int,int>> compute_liveness(LLVMBasic
 }
 
 LLVMValueRef find_spill(LLVMValueRef ins, std::unordered_map<LLVMValueRef, int>& reg_map, std::unordered_map<LLVMValueRef, int>& inst_index, std::vector<LLVMValueRef>& sorted_list, std::unordered_map <LLVMValueRef, std::pair<int,int>>& live_range) {
+    (void)inst_index;
     int ins_start = live_range[ins].first;
     int ins_end = live_range[ins].second;
     for (LLVMValueRef v_ins : sorted_list){
@@ -230,52 +233,40 @@ void printFunctionEnd(FILE* file_to_write){
 // populates offset_map which associated a value(instruction) to the memory offset it has from %ebp and gets localMem
 std::pair<std::unordered_map<LLVMValueRef, int>, int> getOffsetMap(LLVMModuleRef module){
     std::unordered_map<LLVMValueRef, int> offset_map;
-    // number of bytes required to store the local values being initialized to 4
-    int localMem = 4;
-    // since there is just one function the following loop will run once
-    for (LLVMValueRef func = LLVMGetFirstFunction(module); func != NULL; func = LLVMGetNextFunction(func)){
-        if (LLVMIsDeclaration(func)){continue;}
-        if (LLVMCountParams(func) > 0){
-            // we only have one param by specifications of mini c so we use it
-            LLVMValueRef parameter = LLVMGetParam(func, 0);
-            offset_map[parameter] = 8;
-        }
-        for (LLVMBasicBlockRef bb = LLVMGetFirstBasicBlock(func); bb != NULL; bb = LLVMGetNextBasicBlock(bb)){
-            for (LLVMValueRef ins = LLVMGetFirstInstruction(bb); ins != NULL; ins = LLVMGetNextInstruction(ins)){
-                // handling case depending on the type of instruction
-
-                if (LLVMGetInstructionOpcode(ins) == LLVMAlloca) {
+    int localMem = 0;
+    for (LLVMValueRef func = LLVMGetFirstFunction(module); func; func = LLVMGetNextFunction(func)) {
+        if (LLVMIsDeclaration(func)) continue;
+        if (LLVMCountParams(func)) offset_map[LLVMGetParam(func, 0)] = 8;
+        for (LLVMBasicBlockRef bb = LLVMGetFirstBasicBlock(func); bb; bb = LLVMGetNextBasicBlock(bb)) {
+            for (LLVMValueRef ins = LLVMGetFirstInstruction(bb); ins; ins = LLVMGetNextInstruction(ins)) {
+                // SSA temporaries need their own spill slots: aliasing a variable's
+                // slot loses the old value when that variable is assigned again.
+                if (LLVMGetTypeKind(LLVMTypeOf(ins)) != LLVMVoidTypeKind) {
                     localMem += 4;
-                    offset_map[ins] = -1*localMem;
+                    offset_map[ins] = -localMem;
                 }
-                if (LLVMGetInstructionOpcode(ins) == LLVMStore){
-                    LLVMValueRef first_operand = LLVMGetOperand(ins, 0);
-                    LLVMValueRef second_operand = LLVMGetOperand(ins, 1);
-                    // case when the first operand of the store instruction is equal to the function parameter
-                    if (LLVMCountParams(func) > 0 && first_operand == LLVMGetParam(func, 0)){
-                        // getting the value associated to the first operand
-                        int x = offset_map[first_operand];
-                        // changing the value associated with the second operand to be x
-                        offset_map[second_operand] = x;
-                    }
-                    // case when the first operand of the store instruction is not equal to the parameter and is not constant
-                    else if (!LLVMIsConstant(first_operand)){
-                        // getting the value associated with the second operand in offset_map
-                        int x = offset_map[second_operand];
-                        // adding the first operand as key with the associated value as x in offset_map
-                        offset_map[first_operand] = x;
-                    }
-                }
-                if (LLVMGetInstructionOpcode(ins) == LLVMLoad){
-                    // getting the value associated with the first operand in the offset_map and naming it x
-                    int x = offset_map[LLVMGetOperand(ins, 0)];
-                    // adding ins as the key with the associated value as x in the offset_map
-                    offset_map[ins] = x;
+                if (LLVMGetInstructionOpcode(ins) == LLVMStore && LLVMCountParams(func) &&
+                    LLVMGetOperand(ins, 0) == LLVMGetParam(func, 0)) {
+                    offset_map[LLVMGetOperand(ins, 1)] = 8;
                 }
             }
         }
     }
+    // With push ebp, frame allocation and push ebx, ESP is 16-byte aligned.
+    localMem = ((localMem + 12 + 15) / 16) * 16 - 12;
     return {offset_map, localMem};
+}
+
+static std::string operandLocation(LLVMValueRef value,
+        const std::unordered_map<LLVMValueRef, int>& reg_map,
+        const std::unordered_map<LLVMValueRef, int>& offset_map) {
+    if (LLVMIsAConstantInt(value)) return "$" + std::to_string(LLVMConstIntGetSExtValue(value));
+    auto reg = reg_map.find(value);
+    if (reg != reg_map.end() && reg->second != -1) {
+        const char* registers[] = {"%ebx", "%ecx", "%edx"};
+        return registers[reg->second];
+    }
+    return std::to_string(offset_map.at(value)) + "(%ebp)";
 }
 
 // code generation algorithm
@@ -334,6 +325,10 @@ void assembly_code_generation(LLVMModuleRef module, std::unordered_map<LLVMValue
                         } else {
                             fprintf(file_to_write, "\tmovl %d(%%ebp), %%edx\n", c);
                         }
+                    } else {
+                        int source = offset_map.at(LLVMGetOperand(ins, 0));
+                        fprintf(file_to_write, "\tmovl %d(%%ebp), %%eax\n\tmovl %%eax, %d(%%ebp)\n",
+                                source, offset_map.at(ins));
                     }
                 }
                 // case: if ins is a store: (store i32 A, i32* %b)
@@ -370,6 +365,9 @@ void assembly_code_generation(LLVMModuleRef module, std::unordered_map<LLVMValue
                     }
                 // case: (%a = call type @func()) or (call type @func(P))
                 } else if (LLVMGetInstructionOpcode(ins) == LLVMCall){
+                    unsigned arg_bytes = 4 * LLVMGetNumArgOperands(ins);
+                    unsigned padding = (16 - ((8 + arg_bytes) % 16)) % 16;
+                    fprintf(file_to_write, "\tsubl $%u, %%esp\n", padding);
                     fprintf(file_to_write, "\tpushl %%ecx\n");
                     fprintf(file_to_write, "\tpushl %%edx\n");
                     // if func takes a param P
@@ -403,6 +401,7 @@ void assembly_code_generation(LLVMModuleRef module, std::unordered_map<LLVMValue
                     }
                     fprintf(file_to_write, "\tpopl %%edx\n");
                     fprintf(file_to_write, "\tpopl %%ecx\n");
+                    fprintf(file_to_write, "\taddl $%u, %%esp\n", padding);
                     
                     // case: instruction is of the form (%a = call type @func())
                     if (LLVMGetTypeKind(LLVMTypeOf(ins)) != LLVMVoidTypeKind){
@@ -426,6 +425,22 @@ void assembly_code_generation(LLVMModuleRef module, std::unordered_map<LLVMValue
                     }
                 }
                     
+                else if (LLVMGetInstructionOpcode(ins) == LLVMSDiv) {
+                    // IDIV clobbers EDX:EAX. Save EDX and the divisor before
+                    // sign extension so a divisor allocated in EDX survives.
+                    std::string lhs = operandLocation(LLVMGetOperand(ins, 0), reg_map, offset_map);
+                    std::string rhs = operandLocation(LLVMGetOperand(ins, 1), reg_map, offset_map);
+                    std::string dest = operandLocation(ins, reg_map, offset_map);
+                    fprintf(file_to_write, "\tpushl %%edx\n\tpushl %s\n\tmovl %s, %%eax\n"
+                            "\tcltd\n\tidivl (%%esp)\n\taddl $4, %%esp\n\tpopl %%edx\n\tmovl %%eax, %s\n",
+                            rhs.c_str(), lhs.c_str(), dest.c_str());
+                }
+                else if (LLVMGetInstructionOpcode(ins) == LLVMZExt) {
+                    std::string source = operandLocation(LLVMGetOperand(ins, 0), reg_map, offset_map);
+                    std::string dest = operandLocation(ins, reg_map, offset_map);
+                    fprintf(file_to_write, "\tmovl %s, %%eax\n\tmovl %%eax, %s\n", source.c_str(), dest.c_str());
+                }
+
                 // case instruction is a branch: (br i1 %a, label %b, label %c) or (br label %b)
                 else if (LLVMGetInstructionOpcode(ins) == LLVMBr){
                     // if the branch is unconditional (br label %b)
@@ -440,22 +455,12 @@ void assembly_code_generation(LLVMModuleRef module, std::unordered_map<LLVMValue
                         // getting label L2 for %b
                         const char* L2 = BBLabels[LLVMValueAsBasicBlock(LLVMGetOperand(ins, 1))];
                         LLVMValueRef condition = LLVMGetCondition(ins);
-                        // getting the predicate T of comparison from instruction %a (<, >, <=, >=, ==)
-                        LLVMIntPredicate predicate = LLVMGetICmpPredicate(condition);
-                        // based on the value of T emits jxx L1
-                        if (predicate == LLVMIntEQ){
-                            fprintf(file_to_write, "\tje %s\n", L1);
-                        } else if (predicate == LLVMIntNE){
-                            fprintf(file_to_write, "\tjne %s\n", L1);
-                        } else if (predicate == LLVMIntSGT){
-                            fprintf(file_to_write, "\tjg %s\n", L1);
-                        } else if (predicate == LLVMIntSGE){
-                            fprintf(file_to_write, "\tjge %s\n", L1);
-                        } else if (predicate == LLVMIntSLT){
-                            fprintf(file_to_write, "\tjl %s\n", L1);
-                        } else if (predicate == LLVMIntSLE ){
-                            fprintf(file_to_write, "\tjle %s\n", L1);
+                        if (LLVMIsAConstantInt(condition)) {
+                            fprintf(file_to_write, "\tjmp %s\n", LLVMConstIntGetZExtValue(condition) ? L1 : L2);
+                            continue;
                         }
+                        std::string location = operandLocation(condition, reg_map, offset_map);
+                        fprintf(file_to_write, "\tcmpl $0, %s\n\tjne %s\n", location.c_str(), L1);
                         // emits jmp L2
                         fprintf(file_to_write, "\tjmp %s\n", L2);
                     }
@@ -635,9 +640,25 @@ void assembly_code_generation(LLVMModuleRef module, std::unordered_map<LLVMValue
                                 fprintf(file_to_write, "\tcmpl %d(%%ebp), %s\n", m, R);
                             }
                         }
+                        const char* cc = nullptr;
+                        switch (LLVMGetICmpPredicate(ins)) {
+                            case LLVMIntEQ: cc = "e"; break;
+                            case LLVMIntNE: cc = "ne"; break;
+                            case LLVMIntSGT: cc = "g"; break;
+                            case LLVMIntSGE: cc = "ge"; break;
+                            case LLVMIntSLT: cc = "l"; break;
+                            case LLVMIntSLE: cc = "le"; break;
+                            default: std::abort();
+                        }
+                        fprintf(file_to_write, "\tset%s %%al\n\tmovzbl %%al, %s\n", cc, R);
+                        if (reg_map[ins] == -1)
+                            fprintf(file_to_write, "\tmovl %%eax, %d(%%ebp)\n", offset_map.at(ins));
+
                     }
                 }
             }
         }
+        for (const auto& label : BBLabels) free(label.second);
     }
+    fprintf(file_to_write, ".section .note.GNU-stack,\"\",@progbits\n");
 }

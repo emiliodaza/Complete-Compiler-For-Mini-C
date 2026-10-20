@@ -1,0 +1,9 @@
+/build/
+/minic
+/.venv/
+__pycache__/
+*.pyc
+*.s
+*.ll
+*.o
+.DS_Store

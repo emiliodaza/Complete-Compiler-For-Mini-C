@@ -6,11 +6,13 @@
     #include <unordered_set>
     #include <string>
     #include <assert.h>
+    #include <cstring>
 
     astNode* root; // root note of AST
     std::vector<std::unordered_set<std::string>> scopes; // contains the symbol tables for scope
 
     int traverse(astNode* r);
+    int require_int(astNode* node);
     int yylex(void);
     void yyerror(const char *s);
     int semantic_analysis(astNode* root);
@@ -43,7 +45,8 @@
 %token IF ELSE RETURN END_OF_STATEMENT PRINT READ
 %token EXTERN INT_DECLARATION VOID_DECLARATION
 
-%left LE GE EQ NEQ LT GT
+%left EQ NEQ
+%left LE GE LT GT
 %left ADD MINUS
 %left DIVIDE MUL
 %right UMINUS
@@ -104,7 +107,7 @@ extern_read : EXTERN INT_DECLARATION READ LEFT_PARENTHESIS RIGHT_PARENTHESIS END
             ;
 
 func        : INT_DECLARATION IDENTIFIER LEFT_PARENTHESIS param_func_possibilities RIGHT_PARENTHESIS block   {$$ = createFunc($2, $4, $6);}
-            | VOID_DECLARATION IDENTIFIER LEFT_PARENTHESIS param_func_possibilities RIGHT_PARENTHESIS block  {$$ = createFunc($2, $4, $6);}
+            | VOID_DECLARATION IDENTIFIER LEFT_PARENTHESIS param_func_possibilities RIGHT_PARENTHESIS block  {yyerror("MiniC requires an int function return type"); free($2); if ($4) freeNode($4); freeNode($6); YYERROR;}
             ;
 
 
@@ -130,6 +133,14 @@ int semantic_analysis(astNode* root){
     int err = traverse(root); // returns 1 if error and 0 if matches the semantic rules
     get_out_of_scope();
     return err;
+}
+
+int require_int(astNode* node) {
+    if (node && node->type == ast_stmt && node->stmt.type == ast_call &&
+        strcmp(node->stmt.call.name, "print") == 0) {
+        return semantic_error_notifier("void function used as an integer", "print");
+    }
+    return traverse(node);
 }
 // Depth First Search to traverse the AST
 int traverse(astNode* node){
@@ -186,15 +197,19 @@ int traverse(astNode* node){
         case (ast_stmt) :
             switch (node->stmt.type) {
                 case (ast_call) :
+                    if (strcmp(node->stmt.call.name, "print") != 0 &&
+                        strcmp(node->stmt.call.name, "read") != 0) {
+                        return semantic_error_notifier("unknown function", node->stmt.call.name);
+                    }
                     if (node->stmt.call.param != NULL) {
                         // to check if the potential variables follow the rules
-                        return traverse(node->stmt.call.param); 
+                        return require_int(node->stmt.call.param);
                     }
                     return 0;
                 
                 case (ast_ret) :
                     if (node -> stmt.ret.expr != NULL) {
-                        return traverse(node->stmt.ret.expr);
+                        return require_int(node->stmt.ret.expr);
                     }
                     return 0; // no rule has been broken
                                 
@@ -210,7 +225,7 @@ int traverse(astNode* node){
                                 
                 case (ast_while) :
                     if (node -> stmt.whilen.cond != NULL) {
-                        if (traverse(node->stmt.whilen.cond)) return 1;
+                        if (require_int(node->stmt.whilen.cond)) return 1;
                     }
                     if (node -> stmt.whilen.body != NULL) {
                         if (traverse(node->stmt.whilen.body)) return 1;
@@ -219,7 +234,7 @@ int traverse(astNode* node){
                                 
                 case (ast_if) :
                     if (node -> stmt.ifn.cond != NULL) {
-                        if (traverse(node->stmt.ifn.cond)) return 1;
+                        if (require_int(node->stmt.ifn.cond)) return 1;
                     }
                     if (node -> stmt.ifn.if_body != NULL) {
                         if (traverse(node->stmt.ifn.if_body)) return 1;
@@ -242,7 +257,7 @@ int traverse(astNode* node){
                     }
                     if (node -> stmt.asgn.rhs != NULL){
                         // it is an expression thus traversing is also reasonable
-                        if(traverse(node->stmt.asgn.rhs)) return 1;
+                        if(require_int(node->stmt.asgn.rhs)) return 1;
                     }
                     return 0;
 
@@ -253,28 +268,28 @@ int traverse(astNode* node){
 
         case (ast_rexpr) :
             if (node->rexpr.lhs != NULL){
-                if (traverse(node->rexpr.lhs)) return 1;
+                if (require_int(node->rexpr.lhs)) return 1;
             }
 
             if (node->rexpr.rhs != NULL){
-                if (traverse(node->rexpr.rhs)) return 1;
+                if (require_int(node->rexpr.rhs)) return 1;
             }
             
             return 0;
 
         case (ast_bexpr) :
             if (node->bexpr.lhs != NULL) {
-                if (traverse(node->bexpr.lhs)) return 1;
+                if (require_int(node->bexpr.lhs)) return 1;
             } 
 
             if (node->bexpr.rhs != NULL) {
-                if (traverse(node->bexpr.rhs)) return 1;
+                if (require_int(node->bexpr.rhs)) return 1;
             }
             
             return 0;
 
         case (ast_uexpr) :
-            if (node->uexpr.expr != NULL) return traverse(node->uexpr.expr);
+            if (node->uexpr.expr != NULL) return require_int(node->uexpr.expr);
             fprintf(stderr, "Unary expression does not have an operand. Error.\n");
             return 1;
 

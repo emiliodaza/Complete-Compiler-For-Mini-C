@@ -1,0 +1,5 @@
+# Historical LLVM API snapshots are third-party reference material, not the implementation.
+/Analysis.h linguist-vendored
+/Core.h linguist-vendored
+/IRReader.h linguist-vendored
+/TargetMachine.h linguist-vendored
